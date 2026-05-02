@@ -14,11 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from airlock import (
     _colorize,
     _detect_package_manager,
+    _extract_exec_packages,
     _find_pkg_binary,
     _load_script_allowlist,
     _parse_lockfile_packages,
     _parse_packages_from_args,
     cmd_audit,
+    cmd_exec,
     cmd_install,
     cmd_scan,
 )
@@ -461,6 +463,194 @@ class TestMainArgParsing(unittest.TestCase):
             main()
         args = mock_cmd.call_args[0][0]
         self.assertTrue(args.verbose)
+
+
+class TestExtractExecPackages(unittest.TestCase):
+    def test_simple_command(self):
+        self.assertEqual(_extract_exec_packages(["create-react-app", "my-app"]), ["create-react-app"])
+
+    def test_package_flag_short(self):
+        result = _extract_exec_packages(["-p", "typescript", "tsc", "--init"])
+        self.assertEqual(result, ["typescript"])
+
+    def test_package_flag_long(self):
+        result = _extract_exec_packages(["--package", "typescript", "tsc"])
+        self.assertEqual(result, ["typescript"])
+
+    def test_multiple_package_flags(self):
+        result = _extract_exec_packages(["-p", "typescript", "-p", "ts-node", "tsc", "script.ts"])
+        self.assertEqual(result, ["typescript", "ts-node"])
+
+    def test_empty_args(self):
+        self.assertEqual(_extract_exec_packages([]), [])
+
+    def test_only_flags(self):
+        self.assertEqual(_extract_exec_packages(["--yes", "--quiet"]), [])
+
+    def test_scoped_package(self):
+        result = _extract_exec_packages(["@angular/cli", "new", "my-app"])
+        self.assertEqual(result, ["@angular/cli"])
+
+    def test_versioned_package(self):
+        result = _extract_exec_packages(["create-next-app@latest", "my-app"])
+        self.assertEqual(result, ["create-next-app@latest"])
+
+    def test_package_flag_at_end(self):
+        result = _extract_exec_packages(["-p", "foo", "-p"])
+        self.assertEqual(result, ["foo"])
+
+
+class TestCmdExec(unittest.TestCase):
+    @patch("airlock.audit_package")
+    @patch("airlock.subprocess.run")
+    def test_clean_exec(self, mock_run, mock_audit):
+        mock_audit.return_value = MagicMock(risks=[], severity="info", name="cowsay", version="1.0.0")
+        mock_run.return_value = MagicMock(returncode=0)
+
+        args = SimpleNamespace(exec_args=["cowsay", "hello"], force=False)
+        result = cmd_exec(args)
+        self.assertEqual(result, 0)
+        mock_audit.assert_called_once_with("cowsay", None)
+        mock_run.assert_called_once_with(["cowsay", "hello"])
+
+    @patch("airlock.audit_package")
+    def test_critical_blocks(self, mock_audit):
+        mock_audit.return_value = MagicMock(
+            risks=[{"risk": "typosquatting", "severity": "critical", "detail": "test"}],
+            severity="critical", name="reakt", version="1.0.0",
+        )
+        args = SimpleNamespace(exec_args=["reakt", "build"], force=False)
+        result = cmd_exec(args)
+        self.assertEqual(result, 1)
+
+    @patch("airlock.audit_package")
+    @patch("airlock.subprocess.run")
+    def test_critical_proceeds_with_force(self, mock_run, mock_audit):
+        mock_audit.return_value = MagicMock(
+            risks=[{"risk": "typosquatting", "severity": "critical", "detail": "test"}],
+            severity="critical", name="reakt", version="1.0.0",
+        )
+        mock_run.return_value = MagicMock(returncode=0)
+
+        args = SimpleNamespace(exec_args=["reakt", "build"], force=True)
+        result = cmd_exec(args)
+        self.assertEqual(result, 0)
+
+    @patch("airlock.subprocess.run")
+    def test_no_packages_passthrough(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        args = SimpleNamespace(exec_args=["--version"], force=False)
+        result = cmd_exec(args)
+        self.assertEqual(result, 0)
+        mock_run.assert_called_once_with(["--version"])
+
+    @patch("airlock.subprocess.run")
+    def test_empty_exec_args(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        args = SimpleNamespace(exec_args=[], force=False)
+        result = cmd_exec(args)
+        self.assertEqual(result, 0)
+
+    @patch("airlock.audit_package")
+    @patch("airlock.subprocess.run")
+    def test_versioned_package(self, mock_run, mock_audit):
+        mock_audit.return_value = MagicMock(risks=[], severity="info", name="create-next-app", version="14.0.0")
+        mock_run.return_value = MagicMock(returncode=0)
+
+        args = SimpleNamespace(exec_args=["create-next-app@14.0.0", "my-app"], force=False)
+        result = cmd_exec(args)
+        self.assertEqual(result, 0)
+        mock_audit.assert_called_once_with("create-next-app", "14.0.0")
+
+    @patch("airlock.audit_package")
+    @patch("airlock.subprocess.run")
+    def test_scoped_package(self, mock_run, mock_audit):
+        mock_audit.return_value = MagicMock(risks=[], severity="info", name="@angular/cli", version="17.0.0")
+        mock_run.return_value = MagicMock(returncode=0)
+
+        args = SimpleNamespace(exec_args=["@angular/cli", "new", "my-app"], force=False)
+        result = cmd_exec(args)
+        self.assertEqual(result, 0)
+        mock_audit.assert_called_once_with("@angular/cli", None)
+
+    @patch("airlock.audit_package")
+    @patch("airlock.subprocess.run")
+    def test_package_flag_audit(self, mock_run, mock_audit):
+        mock_audit.return_value = MagicMock(risks=[], severity="info", name="typescript", version="5.0.0")
+        mock_run.return_value = MagicMock(returncode=0)
+
+        args = SimpleNamespace(exec_args=["-p", "typescript", "tsc", "--init"], force=False)
+        result = cmd_exec(args)
+        self.assertEqual(result, 0)
+        mock_audit.assert_called_once_with("typescript", None)
+
+
+class TestCmdInstallUpdate(unittest.TestCase):
+    @patch("airlock.scan_node_modules")
+    @patch("airlock._parse_lockfile_packages")
+    @patch("airlock._find_pkg_binary", return_value="/usr/bin/npm")
+    @patch("airlock.subprocess.run")
+    def test_update_subcmd(self, mock_run, mock_find, mock_lockpkg, mock_scan):
+        mock_run.return_value = MagicMock(returncode=0)
+        mock_lockpkg.return_value = set()
+        mock_scan.return_value = {}
+
+        args = SimpleNamespace(
+            pkg_args=[], pm="npm", force=False, no_sandbox=False,
+            no_strace=True, script_timeout=300, subcmd="update",
+        )
+        result = cmd_install(args)
+        self.assertEqual(result, 0)
+        install_call = mock_run.call_args[0][0]
+        self.assertEqual(install_call[1], "update")
+
+    @patch("airlock.scan_node_modules")
+    @patch("airlock._parse_lockfile_packages")
+    @patch("airlock._find_pkg_binary", return_value="/usr/bin/pnpm")
+    @patch("airlock.subprocess.run")
+    def test_pnpm_add_vs_install(self, mock_run, mock_find, mock_lockpkg, mock_scan):
+        mock_run.return_value = MagicMock(returncode=0)
+        mock_lockpkg.return_value = set()
+        mock_scan.return_value = {}
+
+        args = SimpleNamespace(
+            pkg_args=["react"], pm="pnpm", force=False, no_sandbox=False,
+            no_strace=True, script_timeout=300, subcmd="install",
+        )
+        from airlock import audit_package
+        with patch("airlock.audit_package") as mock_audit:
+            mock_audit.return_value = MagicMock(risks=[], severity="info", name="react", version="18.0.0")
+            result = cmd_install(args)
+        self.assertEqual(result, 0)
+        install_call = mock_run.call_args[0][0]
+        self.assertEqual(install_call[1], "add")
+
+
+class TestMainExecParsing(unittest.TestCase):
+    @patch("airlock.cmd_exec", return_value=0)
+    def test_exec_command(self, mock_cmd):
+        from airlock import main
+        with patch("sys.argv", ["airlock", "exec", "--", "npx", "cowsay"]):
+            main()
+        mock_cmd.assert_called_once()
+        args = mock_cmd.call_args[0][0]
+        self.assertEqual(args.exec_args, ["npx", "cowsay"])
+
+    @patch("airlock.cmd_exec", return_value=0)
+    def test_exec_force(self, mock_cmd):
+        from airlock import main
+        with patch("sys.argv", ["airlock", "exec", "--force", "--", "npx", "cowsay"]):
+            main()
+        args = mock_cmd.call_args[0][0]
+        self.assertTrue(args.force)
+
+    @patch("airlock.cmd_install", return_value=0)
+    def test_install_subcmd_update(self, mock_cmd):
+        from airlock import main
+        with patch("sys.argv", ["airlock", "install", "--pm", "npm", "--subcmd", "update"]):
+            main()
+        args = mock_cmd.call_args[0][0]
+        self.assertEqual(args.subcmd, "update")
 
 
 if __name__ == "__main__":
