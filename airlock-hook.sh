@@ -9,9 +9,11 @@ _airlock_intercept() {
     local pm="$1"
     shift
 
-    if [ "${AIRLOCK_DISABLED:-0}" = "1" ] || [ "${AIRLOCK_BYPASS:-0}" = "1" ]; then
-        command "$pm" "$@"
-        return
+    if [ -z "${npm_lifecycle_event:-}" ]; then
+        if [ "${AIRLOCK_DISABLED:-0}" = "1" ] || [ "${AIRLOCK_BYPASS:-0}" = "1" ]; then
+            command "$pm" "$@"
+            return
+        fi
     fi
 
     if ! command -v airlock >/dev/null 2>&1; then
@@ -46,9 +48,11 @@ _airlock_exec_intercept() {
     local runner="$1"
     shift
 
-    if [ "${AIRLOCK_DISABLED:-0}" = "1" ] || [ "${AIRLOCK_BYPASS:-0}" = "1" ]; then
-        command "$runner" "$@"
-        return
+    if [ -z "${npm_lifecycle_event:-}" ]; then
+        if [ "${AIRLOCK_DISABLED:-0}" = "1" ] || [ "${AIRLOCK_BYPASS:-0}" = "1" ]; then
+            command "$runner" "$@"
+            return
+        fi
     fi
 
     if ! command -v airlock >/dev/null 2>&1; then
