@@ -1,12 +1,14 @@
 # airlock
 
-Supply chain security for JavaScript packages. Transparent shell hook that intercepts `npm install`, `pnpm add`, `yarn add`, and `bun add` — scanning every package before it touches your codebase.
+Supply chain security for JavaScript packages. Transparent shell hook that intercepts `npm install`, `pnpm add`, `yarn add`, `bun add`, `npx`, `bunx`, and `npm update` — scanning every package before it touches your codebase.
 
 Zero dependencies — pure Python stdlib. Works on macOS and Linux.
 
 ## What it does
 
-Every package install goes through four phases:
+### Install / Update
+
+Every `install` or `update` command goes through four phases:
 
 1. **Registry audit** — checks publish age, maintainer changes, typosquatting, suspicious install scripts
 2. **Safe install** — installs with `--ignore-scripts` so nothing executes yet
@@ -14,6 +16,10 @@ Every package install goes through four phases:
 4. **Monitored execution** — runs postinstall scripts under network monitoring (strace on Linux), flags suspicious connections
 
 If everything is clean, the install completes normally — the developer doesn't notice airlock is there. If threats are found, the install is blocked before any damage.
+
+### Exec (npx / bunx / pnpm dlx)
+
+Exec commands (`npx`, `bunx`, `pnpm dlx`) run a pre-flight registry audit on the package before executing. Critical risks block execution unless `--force` is used.
 
 ## Install
 
@@ -40,7 +46,11 @@ npm install axios        # intercepted — audit + AI scan + monitored scripts
 pnpm add lodash          # intercepted
 yarn add express         # intercepted
 bun add zod              # intercepted
-npm run build            # passed through — not an install command
+npm update               # intercepted — scans updated packages
+pnpm upgrade             # intercepted
+npx create-react-app     # intercepted — pre-flight audit before execution
+bunx degit user/repo     # intercepted
+npm run build            # passed through — not an install/exec command
 ```
 
 Or call airlock directly:
@@ -48,6 +58,9 @@ Or call airlock directly:
 ```bash
 airlock install axios lodash
 airlock install -D typescript
+airlock install --pm pnpm --subcmd update   # run as update
+airlock exec -- npx create-react-app my-app
+airlock exec -- bunx degit user/repo
 airlock audit some-unknown-package
 airlock scan                         # scan existing node_modules
 airlock scan --packages express axios
@@ -112,29 +125,48 @@ Skip these packages during AI threat scanning.
 
 All source files and the installed hook are locked with `chattr +i` (Linux) / `chflags uchg` (macOS). This prevents a compromised AI agent or malicious postinstall script from silently disabling airlock.
 
-To modify source files:
-```bash
-# Linux
-sudo chattr -i ~/projects/airlock/*.py ~/projects/airlock/airlock-hook.sh
-# make changes
-sudo chattr +i ~/projects/airlock/*.py ~/projects/airlock/airlock-hook.sh
+To unlock files for editing or reinstalling:
 
-# macOS
-sudo chflags nouchg ~/projects/airlock/*.py ~/projects/airlock/airlock-hook.sh
-# make changes
-sudo chflags uchg ~/projects/airlock/*.py ~/projects/airlock/airlock-hook.sh
+```bash
+./airlock-lock.sh unlock   # unlock all airlock files
+# make changes or run ./setup.sh (setup re-locks automatically)
+./airlock-lock.sh lock     # lock again when done
 ```
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `airlock install [packages...]` | Install with full four-phase pipeline |
+| `airlock install --subcmd update` | Update packages with audit + scan |
+| `airlock exec -- <command>` | Pre-flight audit before npx/bunx/dlx execution |
+| `airlock audit <packages...>` | Audit packages against the npm registry |
+| `airlock scan` | Scan existing node_modules for AI threats |
+
+### Flags
+
+| Flag | Commands | Description |
+|---|---|---|
+| `--force` | install, exec | Proceed despite critical risks |
+| `--pm <npm\|pnpm\|yarn\|bun>` | install | Override package manager auto-detection |
+| `--no-sandbox` | install | Disable bwrap sandbox, monitor only |
+| `--no-strace` | install | Use connection diffing instead of strace |
+| `--script-timeout <seconds>` | install | Timeout for postinstall scripts (default: 300) |
+| `--packages <names...>` | scan | Scan specific packages only |
+| `--verbose` / `-v` | scan | Show clean packages too |
 
 ## Architecture
 
 ```
 airlock/
-├── airlock.py        CLI entry point — orchestrates the four phases
+├── airlock.py        CLI entry point — orchestrates install, exec, scan, audit
 ├── auditor.py        Registry checks: age, maintainers, typosquatting, scripts
 ├── ai_shield.py      AI prompt injection, zero-width chars, obfuscation scanner
 ├── netwatch.py       strace/bwrap network monitoring during postinstall
-├── airlock-hook.sh   Shell functions that intercept npm/pnpm/yarn/bun
-└── setup.sh          Cross-platform installer (macOS + Linux)
+├── airlock-hook.sh   Shell functions that intercept npm/pnpm/yarn/bun/npx/bunx
+├── setup.sh          Cross-platform installer (macOS + Linux)
+├── airlock-lock.sh   Lock/unlock helper for immutable files
+└── tests/            249 unit tests
 ```
 
 ## How it handles dirty vs. clean installs
@@ -158,6 +190,25 @@ airlock/
 | File locking | `chattr +i` | `chflags uchg` |
 
 On macOS, Phases 1-3 provide full protection. Phase 4 monitoring requires Linux.
+
+## Intercepted commands
+
+| Package manager | Install | Update | Exec |
+|---|---|---|---|
+| npm | `npm install`, `npm i` | `npm update`, `npm upgrade` | `npx` |
+| pnpm | `pnpm add`, `pnpm install`, `pnpm i` | `pnpm update`, `pnpm upgrade`, `pnpm up` | `pnpm dlx`, `pnpm exec` |
+| yarn | `yarn add`, `yarn install`, `yarn i` | `yarn upgrade`, `yarn up` | — |
+| bun | `bun add`, `bun install`, `bun i` | `bun update` | `bunx` |
+
+All other subcommands (`run`, `build`, `test`, etc.) pass through to the real binary.
+
+## Running tests
+
+Requires Python 3.10+.
+
+```bash
+python -m unittest discover tests -v
+```
 
 ## License
 
