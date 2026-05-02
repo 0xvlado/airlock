@@ -26,13 +26,43 @@ _airlock_intercept() {
             printf '\033[0;36m[airlock]\033[0m intercepting %s %s\n' "$pm" "$subcmd"
             command airlock install --pm "$pm" -- "$@"
             ;;
+        update|upgrade|up)
+            shift
+            printf '\033[0;36m[airlock]\033[0m intercepting %s %s\n' "$pm" "$subcmd"
+            command airlock install --pm "$pm" --subcmd update -- "$@"
+            ;;
+        dlx|exec)
+            shift
+            printf '\033[0;36m[airlock]\033[0m intercepting %s %s\n' "$pm" "$subcmd"
+            command airlock exec -- "$pm" "$subcmd" "$@"
+            ;;
         *)
             command "$pm" "$@"
             ;;
     esac
 }
 
+_airlock_exec_intercept() {
+    local runner="$1"
+    shift
+
+    if [ "${AIRLOCK_DISABLED:-0}" = "1" ] || [ "${AIRLOCK_BYPASS:-0}" = "1" ]; then
+        command "$runner" "$@"
+        return
+    fi
+
+    if ! command -v airlock >/dev/null 2>&1; then
+        command "$runner" "$@"
+        return
+    fi
+
+    printf '\033[0;36m[airlock]\033[0m intercepting %s\n' "$runner"
+    command airlock exec -- "$runner" "$@"
+}
+
 npm()  { _airlock_intercept npm  "$@"; }
 pnpm() { _airlock_intercept pnpm "$@"; }
 yarn() { _airlock_intercept yarn "$@"; }
 bun()  { _airlock_intercept bun  "$@"; }
+npx()  { _airlock_exec_intercept npx  "$@"; }
+bunx() { _airlock_exec_intercept bunx "$@"; }

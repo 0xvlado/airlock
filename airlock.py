@@ -137,13 +137,15 @@ def cmd_install(args: argparse.Namespace) -> int:
             logger.warning("Proceeding despite critical risks (--force)")
 
     # Phase 2: Install with --ignore-scripts
-    logger.info("--- Phase 2: Install (scripts disabled) ---")
+    subcmd = getattr(args, "subcmd", "install")
+    logger.info("--- Phase 2: %s (scripts disabled) ---", subcmd.capitalize())
     before_packages = _parse_lockfile_packages(pm)
 
-    install_cmd = [pm_bin, "install", "--ignore-scripts"] + args.pkg_args
-    if pm == "pnpm":
+    if subcmd == "update":
+        install_cmd = [pm_bin, "update", "--ignore-scripts"] + args.pkg_args
+    elif pm == "pnpm":
         install_cmd = [pm_bin, "add", "--ignore-scripts"] + args.pkg_args if packages else [pm_bin, "install", "--ignore-scripts"]
-    elif pm == "npm":
+    else:
         install_cmd = [pm_bin, "install", "--ignore-scripts"] + args.pkg_args
 
     logger.info("Running: %s", " ".join(install_cmd))
@@ -242,6 +244,63 @@ def cmd_install(args: argparse.Namespace) -> int:
     return 0
 
 
+def _extract_exec_packages(exec_args: list[str]) -> list[str]:
+    explicit = []
+    it = iter(exec_args)
+    for a in it:
+        if a in ("-p", "--package"):
+            pkg = next(it, None)
+            if pkg:
+                explicit.append(pkg)
+            continue
+        if a.startswith("-"):
+            continue
+        if explicit:
+            break
+        return [a]
+    return explicit
+
+
+def cmd_exec(args: argparse.Namespace) -> int:
+    exec_args = args.exec_args or []
+    packages = _extract_exec_packages(exec_args)
+
+    if not packages:
+        logger.warning("No package detected in exec args, passing through")
+        result = subprocess.run(exec_args)
+        return result.returncode
+
+    logger.info("Exec pre-flight audit for: %s", packages)
+    any_critical = False
+    for pkg in packages:
+        name = pkg
+        version = None
+        if pkg.startswith("@") and pkg.count("@") > 1:
+            name, version = pkg.rsplit("@", 1)
+        elif not pkg.startswith("@") and "@" in pkg:
+            name, version = pkg.rsplit("@", 1)
+
+        audit = audit_package(name, version)
+        if audit.risks:
+            sev = audit.severity.upper()
+            print(f"\n  {_colorize(audit.severity, f'[{sev}]')} {audit.name}@{audit.version}")
+            for r in audit.risks:
+                rs = r["severity"].upper()
+                print(f"    {_colorize(r['severity'], f'[{rs}]')} {r['risk']}: {r['detail']}")
+            if audit.severity == "critical":
+                any_critical = True
+        else:
+            print(f"  {_colorize('info', '[OK]')} {audit.name}@{audit.version}")
+
+    if any_critical and not args.force:
+        logger.critical("Critical risks found. Use --force to run anyway.")
+        return 1
+
+    logger.info("Audit passed, running: %s", " ".join(exec_args))
+    result = subprocess.run(exec_args)
+    return result.returncode
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     target = Path(args.path) if args.path else Path(".")
     packages = args.packages if args.packages else None
@@ -312,6 +371,7 @@ def main() -> int:
     p_install = sub.add_parser("install", help="Install packages securely")
     p_install.add_argument("pkg_args", nargs="*", help="Packages and flags to pass to package manager")
     p_install.add_argument("--pm", choices=["npm", "pnpm", "yarn", "bun"], help="Package manager (auto-detected)")
+    p_install.add_argument("--subcmd", default="install", help=argparse.SUPPRESS)
     p_install.add_argument("--force", action="store_true", help="Install even with critical risks")
     p_install.add_argument("--no-sandbox", action="store_true", help="Don't use bwrap sandbox (monitor only)")
     p_install.add_argument("--no-strace", action="store_true", help="Use connection diffing instead of strace")
@@ -323,6 +383,11 @@ def main() -> int:
     p_scan.add_argument("--packages", nargs="*", help="Specific packages to scan")
     p_scan.add_argument("--verbose", "-v", action="store_true", help="Show clean packages too")
     p_scan.set_defaults(func=cmd_scan)
+
+    p_exec = sub.add_parser("exec", help="Run npx/bunx/dlx with pre-flight audit")
+    p_exec.add_argument("exec_args", nargs="*", help="Command to run (e.g., npx create-react-app)")
+    p_exec.add_argument("--force", action="store_true", help="Run even with critical risks")
+    p_exec.set_defaults(func=cmd_exec)
 
     p_audit = sub.add_parser("audit", help="Audit specific packages against registry")
     p_audit.add_argument("packages", nargs="+", help="Package names to audit")
