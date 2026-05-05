@@ -135,13 +135,13 @@ Airlock supports external security tools via a plugin system. Plugins are define
 
 ### Plugin phases
 
-| Phase            | When it runs                      | Use case                         |
-| ---------------- | --------------------------------- | -------------------------------- |
-| `pre_audit`      | Before Phase 1 (registry audit)   | Pre-flight checks                |
-| `post_audit`     | After Phase 1, before install     | Additional scanning              |
-| `install_binary` | Replaces the pm binary in Phase 2 | Use wrapped binary (e.g. aikido) |
-| `post_install`   | After install, before AI scan     | Post-install verification        |
-| `post_scan`      | After all phases complete         | Reporting, notifications         |
+| Phase            | When it runs                               | Use case                       |
+| ---------------- | ------------------------------------------ | ------------------------------ |
+| `pre_audit`      | Before Phase 1 (registry audit)            | Pre-flight checks              |
+| `post_audit`     | After Phase 1, before install              | Additional scanning            |
+| `install_binary` | Wraps or replaces the pm binary in Phase 2 | Malware scanning (e.g. aikido) |
+| `post_install`   | After install, before AI scan              | Post-install verification      |
+| `post_scan`      | After all phases complete                  | Reporting, notifications       |
 
 ### Plugin config format
 
@@ -151,13 +151,19 @@ Airlock supports external security tools via a plugin system. Plugins are define
     {
       "name": "aikido",
       "phase": "install_binary",
-      "command": "aikido-{pm}",
+      "command": "safe-chain",
+      "mode": "prefix",
       "blocking": true,
       "enabled": true
     }
   ]
 }
 ```
+
+The `mode` field controls how the plugin integrates with the install command:
+
+- **`prefix`** — prepends the command (e.g. `safe-chain pnpm add ...`)
+- **`replace`** — replaces the pm binary entirely
 
 ### Template variables
 
@@ -168,10 +174,22 @@ Airlock supports external security tools via a plugin system. Plugins are define
 
 ### Example: Aikido Safe Chain
 
-With `aikido-pnpm` / `aikido-npm` installed globally via `@aikidosec/safe-chain`, the `install_binary` plugin replaces the raw `pnpm`/`npm` binary with aikido's wrapped version during Phase 2. This means:
+Install [Aikido Safe Chain](https://github.com/AikidoSec/safe-chain):
+
+```bash
+curl -fsSL https://github.com/AikidoSec/safe-chain/releases/latest/download/install-safe-chain.sh | sh
+```
+
+Then enable the plugin:
+
+```bash
+airlock plugin add aikido
+```
+
+Phase 2 now runs `safe-chain pnpm add ...` instead of raw `pnpm add ...`, routing package downloads through aikido's malware-scanning proxy:
 
 1. **Airlock** handles: registry audit, AI threat scan, network monitoring
-2. **Aikido** handles: malware database scanning during the actual install
+2. **Aikido** handles: real-time malware database scanning during install
 
 Both tools run their full security checks without interfering with each other.
 

@@ -147,15 +147,23 @@ def cmd_install(args: argparse.Namespace) -> int:
         return 1
 
     # Phase 2: Install with --ignore-scripts
-    # Check if a plugin provides an alternative binary (e.g. aikido-pnpm)
+    # Check if a plugin provides an alternative binary (e.g. safe-chain prefix)
+    install_prefix = []  # prefix commands (e.g. ["safe-chain"])
     install_bin = pm_bin
     install_bin_plugins = [p for p in plugins if p.phase == "install_binary"]
     for plugin in install_bin_plugins:
+        mode = getattr(plugin, "mode", None) or "replace"
         alt_bin = plugin.command.replace("{pm}", pm)
         resolved = shutil.which(alt_bin)
         if resolved:
-            logger.info("Plugin '%s': using %s as install binary", plugin.name, alt_bin)
-            install_bin = resolved
+            if mode == "prefix":
+                # Prefix mode: safe-chain expects short pm name (e.g. "safe-chain pnpm add ...")
+                logger.info("Plugin '%s': using %s as install prefix", plugin.name, alt_bin)
+                install_prefix = [resolved]
+                install_bin = pm
+            else:
+                logger.info("Plugin '%s': using %s as install binary", plugin.name, alt_bin)
+                install_bin = resolved
             break
         else:
             logger.warning("Plugin '%s': binary '%s' not found, using default", plugin.name, alt_bin)
@@ -165,11 +173,11 @@ def cmd_install(args: argparse.Namespace) -> int:
     before_packages = _parse_lockfile_packages(pm)
 
     if subcmd == "update":
-        install_cmd = [install_bin, "update", "--ignore-scripts"] + args.pkg_args
+        install_cmd = install_prefix + [install_bin, "update", "--ignore-scripts"] + args.pkg_args
     elif pm == "pnpm":
-        install_cmd = [install_bin, "add", "--ignore-scripts"] + args.pkg_args if packages else [install_bin, "install", "--ignore-scripts"]
+        install_cmd = install_prefix + ([install_bin, "add", "--ignore-scripts"] + args.pkg_args if packages else [install_bin, "install", "--ignore-scripts"])
     else:
-        install_cmd = [install_bin, "install", "--ignore-scripts"] + args.pkg_args
+        install_cmd = install_prefix + [install_bin, "install", "--ignore-scripts"] + args.pkg_args
 
     logger.info("Running: %s", " ".join(install_cmd))
     result = subprocess.run(install_cmd, text=True)
@@ -399,6 +407,7 @@ class PluginHook:
     args: list[str] = field(default_factory=list)
     blocking: bool = True
     enabled: bool = True
+    mode: str = "replace"
 
 
 def _load_plugins() -> list[PluginHook]:
@@ -422,6 +431,7 @@ def _load_plugins() -> list[PluginHook]:
                         args=entry.get("args", []),
                         blocking=entry.get("blocking", True),
                         enabled=True,
+                        mode=entry.get("mode", "replace"),
                     ))
                 if plugins:
                     logger.info("Loaded %d plugin(s) from %s", len(plugins), cfg_path)
@@ -482,12 +492,13 @@ KNOWN_PLUGINS = {
     "aikido": {
         "name": "aikido",
         "phase": "install_binary",
-        "command": "aikido-{pm}",
+        "command": "safe-chain",
         "blocking": True,
         "enabled": True,
+        "mode": "prefix",
         "description": "Aikido Safe Chain — malware database scanning during install",
-        "check_binary": "aikido-npm",
-        "install_hint": "npm install -g @aikidosec/safe-chain",
+        "check_binary": "safe-chain",
+        "install_hint": "curl -fsSL https://github.com/AikidoSec/safe-chain/releases/latest/download/install-safe-chain.sh | sh",
     },
 }
 
@@ -545,9 +556,12 @@ def cmd_plugin(args: argparse.Namespace) -> int:
 
         if plugin_name in KNOWN_PLUGINS:
             preset = KNOWN_PLUGINS[plugin_name]
+
             # Check if binary is available
             check_bin = preset.get("check_binary")
-            if check_bin and not shutil.which(check_bin):
+            if check_bin and shutil.which(check_bin):
+                print(f"  Detected: {check_bin}")
+            elif check_bin:
                 print(f"  Warning: '{check_bin}' not found on PATH.")
                 print(f"  Install with: {preset['install_hint']}")
                 print(f"  Adding plugin anyway (will be skipped at runtime if binary missing).\n")
@@ -556,6 +570,7 @@ def cmd_plugin(args: argparse.Namespace) -> int:
                 "name": preset["name"],
                 "phase": preset["phase"],
                 "command": preset["command"],
+                "mode": preset.get("mode", "replace"),
                 "blocking": preset["blocking"],
                 "enabled": preset["enabled"],
             }
@@ -563,8 +578,7 @@ def cmd_plugin(args: argparse.Namespace) -> int:
             _write_plugins_config(config)
             print(f"  Added plugin: {plugin_name}")
             print(f"  Description: {preset['description']}")
-            print(f"  Phase: {preset['phase']}")
-            print(f"  Command: {preset['command']}")
+            print(f"  Command: {preset['command']} ({preset.get('mode', 'replace')} mode)")
         else:
             print(f"Unknown plugin '{plugin_name}'.")
             print(f"Available presets: {', '.join(KNOWN_PLUGINS.keys())}")
