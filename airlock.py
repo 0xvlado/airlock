@@ -155,6 +155,11 @@ def cmd_install(args: argparse.Namespace) -> int:
         mode = getattr(plugin, "mode", None) or "replace"
         alt_bin = plugin.command.replace("{pm}", pm)
         resolved = shutil.which(alt_bin)
+        if not resolved:
+            # Fallback: check common safe-chain install location
+            fallback = Path.home() / ".safe-chain" / "bin" / alt_bin
+            if fallback.exists():
+                resolved = str(fallback)
         if resolved:
             if mode == "prefix":
                 # Prefix mode: safe-chain expects short pm name (e.g. "safe-chain pnpm add ...")
@@ -557,9 +562,10 @@ def cmd_plugin(args: argparse.Namespace) -> int:
         if plugin_name in KNOWN_PLUGINS:
             preset = KNOWN_PLUGINS[plugin_name]
 
-            # Check if binary is available
+            # Check if binary is available (also check common install location)
             check_bin = preset.get("check_binary")
-            if check_bin and shutil.which(check_bin):
+            safe_chain_fallback = Path.home() / ".safe-chain" / "bin" / "safe-chain"
+            if check_bin and (shutil.which(check_bin) or safe_chain_fallback.exists()):
                 print(f"  Detected: {check_bin}")
             elif check_bin:
                 print(f"  Warning: '{check_bin}' not found on PATH.")
