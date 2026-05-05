@@ -52,7 +52,7 @@ PLUGINS_DST="$HOOK_DIR/plugins.json"
 
 if [ ! -f "$PLUGINS_DST" ]; then
     # Check for aikido safe-chain
-    if command -v aikido-npm >/dev/null 2>&1 || command -v aikido-pnpm >/dev/null 2>&1; then
+    if command -v safe-chain >/dev/null 2>&1; then
         echo "  Detected: aikido safe-chain"
         cat > "$PLUGINS_DST" << 'PLUGEOF'
 {
@@ -60,7 +60,8 @@ if [ ! -f "$PLUGINS_DST" ]; then
     {
       "name": "aikido",
       "phase": "install_binary",
-      "command": "aikido-{pm}",
+      "command": "safe-chain",
+      "mode": "prefix",
       "blocking": true,
       "enabled": true
     }
@@ -70,7 +71,8 @@ PLUGEOF
         echo "  Created:  $PLUGINS_DST (aikido enabled)"
     else
         echo "  No external security plugins detected"
-        echo "  Tip: Install @aikidosec/safe-chain for additional malware scanning"
+        echo "  Tip: Install aikido safe-chain for additional malware scanning"
+        echo "        curl -fsSL https://github.com/AikidoSec/safe-chain/releases/latest/download/install-safe-chain.sh | sh"
     fi
 else
     echo "  Existing: $PLUGINS_DST (kept as-is)"
