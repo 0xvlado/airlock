@@ -178,6 +178,13 @@ class TestFindPkgBinary(unittest.TestCase):
 
 
 class TestCmdInstall(unittest.TestCase):
+    def setUp(self):
+        self._plugins_patcher = patch("airlock._load_plugins", return_value=[])
+        self._plugins_patcher.start()
+
+    def tearDown(self):
+        self._plugins_patcher.stop()
+
     def _make_args(self, pkg_args=None, pm="npm", force=False, no_sandbox=False, no_strace=True, script_timeout=300):
         return SimpleNamespace(
             pkg_args=pkg_args or [],
@@ -586,6 +593,12 @@ class TestCmdExec(unittest.TestCase):
 
 
 class TestCmdInstallUpdate(unittest.TestCase):
+    def setUp(self):
+        self._plugins_patcher = patch("airlock._load_plugins", return_value=[])
+        self._plugins_patcher.start()
+
+    def tearDown(self):
+        self._plugins_patcher.stop()
     @patch("airlock.scan_node_modules")
     @patch("airlock._parse_lockfile_packages")
     @patch("airlock._find_pkg_binary", return_value="/usr/bin/npm")

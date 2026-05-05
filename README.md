@@ -31,6 +31,7 @@ bash setup.sh
 ```
 
 This will:
+
 1. Install the `airlock` CLI to `/usr/local/bin`
 2. Add shell hooks to `.bashrc`/`.zshrc` that intercept package managers
 3. Lock all scanner files (`chattr +i` on Linux, `chflags uchg` on macOS)
@@ -78,6 +79,7 @@ command npm install foo            # use real binary directly
 ## What it detects
 
 ### Registry-level (Phase 1)
+
 - Typosquatting (Levenshtein distance from top 80+ packages)
 - Brand new packages (< 7 days old)
 - Very new versions (< 72 hours)
@@ -86,19 +88,21 @@ command npm install foo            # use real binary directly
 - High-entropy names (auto-generated malware packages)
 
 ### AI-targeted threats (Phase 3)
-| Pattern | Example | Severity |
-|---------|---------|----------|
-| Direct prompt override | `ignore all previous instructions` | Critical |
-| Role reassignment | `you are now a helpful...` | Critical |
-| Instruction injection | `new instructions:` | Critical |
-| AI config files | `.cursorrules`, `CLAUDE.md` in a package | Critical |
-| XML prompt tags | `<system>...</system>` | Critical |
-| AI tool targeting | `cursor: always include...` | Critical |
-| Dangerous eval | `eval(Buffer.from(..., 'base64'))` | Critical |
-| Zero-width characters | Hidden unicode in source | High |
-| Obfuscated strings | Long hex-encoded sequences | High |
+
+| Pattern                | Example                                  | Severity |
+| ---------------------- | ---------------------------------------- | -------- |
+| Direct prompt override | `ignore all previous instructions`       | Critical |
+| Role reassignment      | `you are now a helpful...`               | Critical |
+| Instruction injection  | `new instructions:`                      | Critical |
+| AI config files        | `.cursorrules`, `CLAUDE.md` in a package | Critical |
+| XML prompt tags        | `<system>...</system>`                   | Critical |
+| AI tool targeting      | `cursor: always include...`              | Critical |
+| Dangerous eval         | `eval(Buffer.from(..., 'base64'))`       | Critical |
+| Zero-width characters  | Hidden unicode in source                 | High     |
+| Obfuscated strings     | Long hex-encoded sequences               | High     |
 
 ### Network activity (Phase 4)
+
 - Connections to unexpected external hosts during postinstall
 - Suspicious ports (reverse shells, SMTP, database ports)
 - On Linux with bubblewrap: full network isolation (`--sandbox` flag)
@@ -106,20 +110,80 @@ command npm install foo            # use real binary directly
 ## Per-project configuration
 
 ### .airlock-allow.json
+
 ```json
 {
   "allow_scripts": ["sharp", "better-sqlite3", "bcrypt", "@prisma/engines"]
 }
 ```
+
 These packages run postinstall scripts even when threats were detected (with `--force`). During clean installs, all scripts run under monitoring regardless.
 
 ### .airlock-ignore.json
+
 ```json
 {
   "ignore_packages": ["some-known-safe-package"]
 }
 ```
+
 Skip these packages during AI threat scanning.
+
+## Plugins
+
+Airlock supports external security tools via a plugin system. Plugins are defined in `.airlock-plugins.json` (per-project) or `~/.config/airlock/plugins.json` (global).
+
+### Plugin phases
+
+| Phase            | When it runs                      | Use case                         |
+| ---------------- | --------------------------------- | -------------------------------- |
+| `pre_audit`      | Before Phase 1 (registry audit)   | Pre-flight checks                |
+| `post_audit`     | After Phase 1, before install     | Additional scanning              |
+| `install_binary` | Replaces the pm binary in Phase 2 | Use wrapped binary (e.g. aikido) |
+| `post_install`   | After install, before AI scan     | Post-install verification        |
+| `post_scan`      | After all phases complete         | Reporting, notifications         |
+
+### Plugin config format
+
+```json
+{
+  "plugins": [
+    {
+      "name": "aikido",
+      "phase": "install_binary",
+      "command": "aikido-{pm}",
+      "blocking": true,
+      "enabled": true
+    }
+  ]
+}
+```
+
+### Template variables
+
+| Variable     | Replaced with                                    |
+| ------------ | ------------------------------------------------ |
+| `{pm}`       | Detected package manager (npm, pnpm, yarn, bun)  |
+| `{packages}` | Space-separated list of packages being installed |
+
+### Example: Aikido Safe Chain
+
+With `aikido-pnpm` / `aikido-npm` installed globally via `@aikidosec/safe-chain`, the `install_binary` plugin replaces the raw `pnpm`/`npm` binary with aikido's wrapped version during Phase 2. This means:
+
+1. **Airlock** handles: registry audit, AI threat scan, network monitoring
+2. **Aikido** handles: malware database scanning during the actual install
+
+Both tools run their full security checks without interfering with each other.
+
+### Managing plugins via CLI
+
+```bash
+airlock plugin list              # show configured plugins
+airlock plugin add aikido        # add aikido (auto-detects binary)
+airlock plugin remove aikido     # remove aikido
+```
+
+The `add` command checks if the required binary exists and warns if not (but still adds the plugin — it will be skipped at runtime if the binary is missing).
 
 ## Anti-tampering
 
@@ -135,25 +199,28 @@ To unlock files for editing or reinstalling:
 
 ## Commands
 
-| Command | Description |
-|---|---|
-| `airlock install [packages...]` | Install with full four-phase pipeline |
-| `airlock install --subcmd update` | Update packages with audit + scan |
-| `airlock exec -- <command>` | Pre-flight audit before npx/bunx/dlx execution |
-| `airlock audit <packages...>` | Audit packages against the npm registry |
-| `airlock scan` | Scan existing node_modules for AI threats |
+| Command                           | Description                                    |
+| --------------------------------- | ---------------------------------------------- |
+| `airlock install [packages...]`   | Install with full four-phase pipeline          |
+| `airlock install --subcmd update` | Update packages with audit + scan              |
+| `airlock exec -- <command>`       | Pre-flight audit before npx/bunx/dlx execution |
+| `airlock audit <packages...>`     | Audit packages against the npm registry        |
+| `airlock scan`                    | Scan existing node_modules for AI threats      |
+| `airlock plugin list`             | Show configured plugins                        |
+| `airlock plugin add <name>`       | Add a known plugin (e.g. aikido)               |
+| `airlock plugin remove <name>`    | Remove a plugin                                |
 
 ### Flags
 
-| Flag | Commands | Description |
-|---|---|---|
-| `--force` | install, exec | Proceed despite critical risks |
-| `--pm <npm\|pnpm\|yarn\|bun>` | install | Override package manager auto-detection |
-| `--no-sandbox` | install | Disable bwrap sandbox, monitor only |
-| `--no-strace` | install | Use connection diffing instead of strace |
-| `--script-timeout <seconds>` | install | Timeout for postinstall scripts (default: 300) |
-| `--packages <names...>` | scan | Scan specific packages only |
-| `--verbose` / `-v` | scan | Show clean packages too |
+| Flag                          | Commands      | Description                                    |
+| ----------------------------- | ------------- | ---------------------------------------------- |
+| `--force`                     | install, exec | Proceed despite critical risks                 |
+| `--pm <npm\|pnpm\|yarn\|bun>` | install       | Override package manager auto-detection        |
+| `--no-sandbox`                | install       | Disable bwrap sandbox, monitor only            |
+| `--no-strace`                 | install       | Use connection diffing instead of strace       |
+| `--script-timeout <seconds>`  | install       | Timeout for postinstall scripts (default: 300) |
+| `--packages <names...>`       | scan          | Scan specific packages only                    |
+| `--verbose` / `-v`            | scan          | Show clean packages too                        |
 
 ## Architecture
 
@@ -171,34 +238,34 @@ airlock/
 
 ## How it handles dirty vs. clean installs
 
-| Scenario | Scripts | Execution mode |
-|---|---|---|
-| Phases 1-3 clean | All scripts run | Monitor mode (strace) |
-| Phases 1-3 flagged + `--force` | Allowlisted only | Sandbox (bwrap, no network) |
-| Phases 1-3 flagged, no `--force` | Blocked | Install aborted |
+| Scenario                         | Scripts          | Execution mode              |
+| -------------------------------- | ---------------- | --------------------------- |
+| Phases 1-3 clean                 | All scripts run  | Monitor mode (strace)       |
+| Phases 1-3 flagged + `--force`   | Allowlisted only | Sandbox (bwrap, no network) |
+| Phases 1-3 flagged, no `--force` | Blocked          | Install aborted             |
 
 ## Platform support
 
-| Feature | Linux | macOS |
-|---|---|---|
-| Registry audit (Phase 1) | Yes | Yes |
-| Safe install (Phase 2) | Yes | Yes |
-| AI threat scan (Phase 3) | Yes | Yes |
-| strace monitoring (Phase 4) | Yes | No |
-| bwrap sandbox (Phase 4) | Yes | No |
-| Connection diffing (Phase 4) | Yes | No |
-| File locking | `chattr +i` | `chflags uchg` |
+| Feature                      | Linux       | macOS          |
+| ---------------------------- | ----------- | -------------- |
+| Registry audit (Phase 1)     | Yes         | Yes            |
+| Safe install (Phase 2)       | Yes         | Yes            |
+| AI threat scan (Phase 3)     | Yes         | Yes            |
+| strace monitoring (Phase 4)  | Yes         | No             |
+| bwrap sandbox (Phase 4)      | Yes         | No             |
+| Connection diffing (Phase 4) | Yes         | No             |
+| File locking                 | `chattr +i` | `chflags uchg` |
 
 On macOS, Phases 1-3 provide full protection. Phase 4 monitoring requires Linux.
 
 ## Intercepted commands
 
-| Package manager | Install | Update | Exec |
-|---|---|---|---|
-| npm | `npm install`, `npm i` | `npm update`, `npm upgrade` | `npx` |
-| pnpm | `pnpm add`, `pnpm install`, `pnpm i` | `pnpm update`, `pnpm upgrade`, `pnpm up` | `pnpm dlx`, `pnpm exec` |
-| yarn | `yarn add`, `yarn install`, `yarn i` | `yarn upgrade`, `yarn up` | — |
-| bun | `bun add`, `bun install`, `bun i` | `bun update` | `bunx` |
+| Package manager | Install                              | Update                                   | Exec                    |
+| --------------- | ------------------------------------ | ---------------------------------------- | ----------------------- |
+| npm             | `npm install`, `npm i`               | `npm update`, `npm upgrade`              | `npx`                   |
+| pnpm            | `pnpm add`, `pnpm install`, `pnpm i` | `pnpm update`, `pnpm upgrade`, `pnpm up` | `pnpm dlx`, `pnpm exec` |
+| yarn            | `yarn add`, `yarn install`, `yarn i` | `yarn upgrade`, `yarn up`                | —                       |
+| bun             | `bun add`, `bun install`, `bun i`    | `bun update`                             | `bunx`                  |
 
 All other subcommands (`run`, `build`, `test`, etc.) pass through to the real binary.
 

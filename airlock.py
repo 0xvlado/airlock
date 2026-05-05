@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -101,9 +102,14 @@ def cmd_install(args: argparse.Namespace) -> int:
     pm_bin = _find_pkg_binary(pm)
     packages = _parse_packages_from_args(args.pkg_args)
     clean_install = True
+    plugins = _load_plugins()
 
     logger.info("Package manager: %s", pm)
     logger.info("Packages: %s", packages or "(from lockfile)")
+
+    # Plugin hook: pre_audit
+    if not _run_plugin_hook("pre_audit", plugins, pm, packages, args.force):
+        return 1
 
     # Phase 1: Audit packages against registry
     if packages:
@@ -136,23 +142,44 @@ def cmd_install(args: argparse.Namespace) -> int:
                 return 1
             logger.warning("Proceeding despite critical risks (--force)")
 
+    # Plugin hook: post_audit (after registry checks, before install)
+    if not _run_plugin_hook("post_audit", plugins, pm, packages, args.force):
+        return 1
+
     # Phase 2: Install with --ignore-scripts
+    # Check if a plugin provides an alternative binary (e.g. aikido-pnpm)
+    install_bin = pm_bin
+    install_bin_plugins = [p for p in plugins if p.phase == "install_binary"]
+    for plugin in install_bin_plugins:
+        alt_bin = plugin.command.replace("{pm}", pm)
+        resolved = shutil.which(alt_bin)
+        if resolved:
+            logger.info("Plugin '%s': using %s as install binary", plugin.name, alt_bin)
+            install_bin = resolved
+            break
+        else:
+            logger.warning("Plugin '%s': binary '%s' not found, using default", plugin.name, alt_bin)
+
     subcmd = getattr(args, "subcmd", "install")
     logger.info("--- Phase 2: %s (scripts disabled) ---", subcmd.capitalize())
     before_packages = _parse_lockfile_packages(pm)
 
     if subcmd == "update":
-        install_cmd = [pm_bin, "update", "--ignore-scripts"] + args.pkg_args
+        install_cmd = [install_bin, "update", "--ignore-scripts"] + args.pkg_args
     elif pm == "pnpm":
-        install_cmd = [pm_bin, "add", "--ignore-scripts"] + args.pkg_args if packages else [pm_bin, "install", "--ignore-scripts"]
+        install_cmd = [install_bin, "add", "--ignore-scripts"] + args.pkg_args if packages else [install_bin, "install", "--ignore-scripts"]
     else:
-        install_cmd = [pm_bin, "install", "--ignore-scripts"] + args.pkg_args
+        install_cmd = [install_bin, "install", "--ignore-scripts"] + args.pkg_args
 
     logger.info("Running: %s", " ".join(install_cmd))
     result = subprocess.run(install_cmd, text=True)
     if result.returncode != 0:
         logger.error("Install failed with exit code %d", result.returncode)
         return result.returncode
+
+    # Plugin hook: post_install (after install, before AI scan)
+    if not _run_plugin_hook("post_install", plugins, pm, packages, args.force):
+        return 1
 
     # Phase 3: AI injection scan on new packages
     logger.info("--- Phase 3: AI Injection Scan ---")
@@ -239,6 +266,9 @@ def cmd_install(args: argparse.Namespace) -> int:
         logger.info("No allowlisted scripts to run. Packages with scripts were blocked.")
     else:
         logger.info("No post-install scripts needed")
+
+    # Plugin hook: post_scan (after all phases complete)
+    _run_plugin_hook("post_scan", plugins, pm, packages, args.force)
 
     print(f"\n{_colorize('info', '[DONE]')} Installation complete.")
     return 0
@@ -361,6 +391,211 @@ def _load_script_allowlist() -> set[str]:
         return set()
 
 
+@dataclass
+class PluginHook:
+    name: str
+    phase: str
+    command: str
+    args: list[str] = field(default_factory=list)
+    blocking: bool = True
+    enabled: bool = True
+
+
+def _load_plugins() -> list[PluginHook]:
+    """Load plugin definitions from .airlock-plugins.json or ~/.config/airlock/plugins.json"""
+    candidates = [
+        Path(".airlock-plugins.json"),
+        Path.home() / ".config" / "airlock" / "plugins.json",
+    ]
+    for cfg_path in candidates:
+        if cfg_path.exists():
+            try:
+                data = json.loads(cfg_path.read_text())
+                plugins = []
+                for entry in data.get("plugins", []):
+                    if not entry.get("enabled", True):
+                        continue
+                    plugins.append(PluginHook(
+                        name=entry["name"],
+                        phase=entry["phase"],
+                        command=entry["command"],
+                        args=entry.get("args", []),
+                        blocking=entry.get("blocking", True),
+                        enabled=True,
+                    ))
+                if plugins:
+                    logger.info("Loaded %d plugin(s) from %s", len(plugins), cfg_path)
+                return plugins
+            except (OSError, json.JSONDecodeError, KeyError) as e:
+                logger.warning("Failed to load plugins from %s: %s", cfg_path, e)
+    return []
+
+
+def _run_plugin_hook(
+    phase: str,
+    plugins: list[PluginHook],
+    pm: str,
+    packages: list[str],
+    force: bool = False,
+) -> bool:
+    """Run all plugins registered for a given phase. Returns False if a blocking plugin fails."""
+    phase_plugins = [p for p in plugins if p.phase == phase]
+    if not phase_plugins:
+        return True
+
+    for plugin in phase_plugins:
+        cmd_str = plugin.command
+        # Template substitution
+        cmd_str = cmd_str.replace("{pm}", pm)
+        cmd_str = cmd_str.replace("{packages}", " ".join(packages))
+
+        full_args = cmd_str.split() + [
+            a.replace("{pm}", pm).replace("{packages}", " ".join(packages))
+            for a in plugin.args
+        ]
+
+        # Verify binary exists
+        if not shutil.which(full_args[0]):
+            logger.warning("Plugin '%s': binary '%s' not found, skipping", plugin.name, full_args[0])
+            continue
+
+        logger.info("--- Plugin: %s [%s] ---", plugin.name, phase)
+        logger.info("Running: %s", " ".join(full_args))
+
+        result = subprocess.run(full_args)
+        if result.returncode != 0:
+            if plugin.blocking and not force:
+                logger.critical(
+                    "Plugin '%s' failed (exit %d). Use --force to override.",
+                    plugin.name, result.returncode,
+                )
+                return False
+            logger.warning(
+                "Plugin '%s' failed (exit %d), continuing (--force or non-blocking)",
+                plugin.name, result.returncode,
+            )
+
+    return True
+
+
+KNOWN_PLUGINS = {
+    "aikido": {
+        "name": "aikido",
+        "phase": "install_binary",
+        "command": "aikido-{pm}",
+        "blocking": True,
+        "enabled": True,
+        "description": "Aikido Safe Chain — malware database scanning during install",
+        "check_binary": "aikido-npm",
+        "install_hint": "npm install -g @aikidosec/safe-chain",
+    },
+}
+
+
+def _plugins_config_path() -> Path:
+    return Path.home() / ".config" / "airlock" / "plugins.json"
+
+
+def _read_plugins_config() -> dict:
+    cfg = _plugins_config_path()
+    if cfg.exists():
+        try:
+            return json.loads(cfg.read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {"plugins": []}
+
+
+def _write_plugins_config(data: dict) -> None:
+    cfg = _plugins_config_path()
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def cmd_plugin(args: argparse.Namespace) -> int:
+    action = args.action
+
+    if action == "list":
+        config = _read_plugins_config()
+        plugins = config.get("plugins", [])
+        if not plugins:
+            print("No plugins configured.")
+            print(f"\nAvailable: {', '.join(KNOWN_PLUGINS.keys())}")
+            print("Add one with: airlock plugin add <name>")
+            return 0
+        print(f"{'Name':<15} {'Phase':<16} {'Command':<20} {'Enabled'}")
+        print("-" * 65)
+        for p in plugins:
+            enabled = "yes" if p.get("enabled", True) else "no"
+            print(f"{p['name']:<15} {p['phase']:<16} {p['command']:<20} {enabled}")
+        return 0
+
+    if action == "add":
+        plugin_name = args.plugin_name
+        if not plugin_name:
+            print("Usage: airlock plugin add <name>")
+            print(f"Available: {', '.join(KNOWN_PLUGINS.keys())}")
+            return 1
+
+        config = _read_plugins_config()
+        existing = [p["name"] for p in config.get("plugins", [])]
+        if plugin_name in existing:
+            print(f"Plugin '{plugin_name}' is already configured.")
+            return 0
+
+        if plugin_name in KNOWN_PLUGINS:
+            preset = KNOWN_PLUGINS[plugin_name]
+            # Check if binary is available
+            check_bin = preset.get("check_binary")
+            if check_bin and not shutil.which(check_bin):
+                print(f"  Warning: '{check_bin}' not found on PATH.")
+                print(f"  Install with: {preset['install_hint']}")
+                print(f"  Adding plugin anyway (will be skipped at runtime if binary missing).\n")
+
+            entry = {
+                "name": preset["name"],
+                "phase": preset["phase"],
+                "command": preset["command"],
+                "blocking": preset["blocking"],
+                "enabled": preset["enabled"],
+            }
+            config.setdefault("plugins", []).append(entry)
+            _write_plugins_config(config)
+            print(f"  Added plugin: {plugin_name}")
+            print(f"  Description: {preset['description']}")
+            print(f"  Phase: {preset['phase']}")
+            print(f"  Command: {preset['command']}")
+        else:
+            print(f"Unknown plugin '{plugin_name}'.")
+            print(f"Available presets: {', '.join(KNOWN_PLUGINS.keys())}")
+            print("\nTo add a custom plugin, edit ~/.config/airlock/plugins.json directly.")
+            return 1
+
+        return 0
+
+    if action == "remove":
+        plugin_name = args.plugin_name
+        if not plugin_name:
+            print("Usage: airlock plugin remove <name>")
+            return 1
+
+        config = _read_plugins_config()
+        before = len(config.get("plugins", []))
+        config["plugins"] = [p for p in config.get("plugins", []) if p["name"] != plugin_name]
+        after = len(config["plugins"])
+
+        if before == after:
+            print(f"Plugin '{plugin_name}' not found in config.")
+            return 1
+
+        _write_plugins_config(config)
+        print(f"  Removed plugin: {plugin_name}")
+        return 0
+
+    print("Usage: airlock plugin <list|add|remove> [name]")
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="airlock",
@@ -392,6 +627,12 @@ def main() -> int:
     p_audit = sub.add_parser("audit", help="Audit specific packages against registry")
     p_audit.add_argument("packages", nargs="+", help="Package names to audit")
     p_audit.set_defaults(func=cmd_audit)
+
+    p_plugin = sub.add_parser("plugin", help="Manage security plugins")
+    p_plugin.add_argument("action", nargs="?", default="list", choices=["list", "add", "remove"],
+                          help="Action to perform (default: list)")
+    p_plugin.add_argument("plugin_name", nargs="?", default=None, help="Plugin name")
+    p_plugin.set_defaults(func=cmd_plugin)
 
     args = parser.parse_args()
     if not args.command:
