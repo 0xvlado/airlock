@@ -46,6 +46,36 @@ cp "$HOOK_SRC" "$HOOK_DST"
 chmod 644 "$HOOK_DST"
 echo "  Installed: $HOOK_DST"
 
+# --- Step 3b: Detect plugins ---
+echo "  Detecting plugins..."
+PLUGINS_DST="$HOOK_DIR/plugins.json"
+
+if [ ! -f "$PLUGINS_DST" ]; then
+    # Check for aikido safe-chain
+    if command -v aikido-npm >/dev/null 2>&1 || command -v aikido-pnpm >/dev/null 2>&1; then
+        echo "  Detected: aikido safe-chain"
+        cat > "$PLUGINS_DST" << 'PLUGEOF'
+{
+  "plugins": [
+    {
+      "name": "aikido",
+      "phase": "install_binary",
+      "command": "aikido-{pm}",
+      "blocking": true,
+      "enabled": true
+    }
+  ]
+}
+PLUGEOF
+        echo "  Created:  $PLUGINS_DST (aikido enabled)"
+    else
+        echo "  No external security plugins detected"
+        echo "  Tip: Install @aikidosec/safe-chain for additional malware scanning"
+    fi
+else
+    echo "  Existing: $PLUGINS_DST (kept as-is)"
+fi
+
 # --- Step 4: Add to shell rc files ---
 echo "[4/5] Configuring shell startup..."
 
